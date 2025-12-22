@@ -1,5 +1,9 @@
 #  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: Apache-2.0
+import asyncio
+import time
+from unittest.mock import AsyncMock, patch
+
 import pytest
 from smithy_core.exceptions import CallError, RetryError
 from smithy_core.retries import ExponentialBackoffJitterType as EBJT
@@ -10,6 +14,7 @@ from smithy_core.retries import (
     SimpleRetryStrategy,
     StandardRetryQuota,
     StandardRetryStrategy,
+    TokenBucket,
 )
 
 
@@ -275,3 +280,111 @@ async def test_retry_strategy_resolver_rejects_invalid_type() -> None:
         match="retry_strategy must be RetryStrategy, RetryStrategyOptions, or None",
     ):
         await resolver.resolve_retry_strategy(retry_strategy="invalid")  # type: ignore
+
+
+class TestTokenBucket:
+    @pytest.mark.asyncio
+    async def test_initial_state(self):
+        token_bucket = TokenBucket()
+        assert token_bucket.current_capacity == token_bucket.MIN_CAPACITY
+        assert token_bucket.max_capacity == token_bucket.MIN_CAPACITY
+        assert token_bucket.fill_rate == token_bucket.MIN_FILL_RATE
+
+    @pytest.mark.asyncio
+    async def test_acquire_succeeds_immediately_within_capacity(self):
+        token_bucket = TokenBucket()
+        start_time = time.monotonic()
+        await token_bucket.acquire(1)
+        elapsed = time.monotonic() - start_time
+
+        assert elapsed < 0.001  # Should be near instant
+        assert token_bucket.current_capacity == 0
+
+    @pytest.mark.asyncio
+    async def test_acquire_waits_when_capacity_insufficient(self):
+        token_bucket = TokenBucket(curr_capacity=0)
+
+        with patch("asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+
+            async def side_effect(delay: float):
+                async with token_bucket._lock:  # type: ignore
+                    token_bucket._curr_capacity = 1.0  # type: ignore
+
+            mock_sleep.side_effect = side_effect
+            await token_bucket.acquire(1)
+            assert mock_sleep.call_count == 1
+
+            actual_delay = mock_sleep.call_args[0][0]
+            assert actual_delay == pytest.approx(2.0, abs=0.05)  # type: ignore
+
+    @pytest.mark.asyncio
+    async def test_multiple_refills_over_time(self):
+        token_bucket = TokenBucket(curr_capacity=0, max_capacity=10, fill_rate=2.0)
+
+        time_values = iter([1.0, 1.5, 4.0])
+        with patch("time.monotonic", side_effect=lambda: next(time_values)):
+            token_bucket._last_timestamp = 0.0  # type: ignore
+
+            async with token_bucket._lock:  # type: ignore
+                token_bucket._refill()  # type: ignore
+            assert token_bucket.current_capacity == pytest.approx(2.0, abs=0.05)  # type: ignore
+
+        with patch("time.monotonic", side_effect=lambda: next(time_values)):
+            async with token_bucket._lock:  # type: ignore
+                token_bucket._refill()  # type: ignore
+            assert token_bucket.current_capacity == pytest.approx(3.0, abs=0.05)  # type: ignore
+
+        with patch("time.monotonic", side_effect=lambda: next(time_values)):
+            async with token_bucket._lock:  # type: ignore
+                token_bucket._refill()  # type: ignore
+            assert token_bucket.current_capacity == pytest.approx(8.0, abs=0.05)  # type: ignore
+
+    @pytest.mark.asyncio
+    async def test_update_bucket_updates_capacity(self):
+        token_bucket = TokenBucket()
+
+        await token_bucket.update_bucket(5.0)
+        assert token_bucket.fill_rate == 5.0
+        assert token_bucket.max_capacity == 5.0
+        assert token_bucket.current_capacity == 1.0
+
+    @pytest.mark.asyncio
+    async def test_rate_can_never_be_zero(self):
+        token_bucket = TokenBucket()
+        await token_bucket.update_bucket(0.0)
+
+        assert token_bucket.fill_rate != 0.0
+
+    @pytest.mark.asyncio
+    async def test_refill_caps_at_max_capacity(self):
+        token_bucket = TokenBucket()
+        # Max and current capacity of the bucket is set to 1.0 initially
+        await token_bucket.update_bucket(10.0)
+
+        async with token_bucket._lock:  # type: ignore
+            token_bucket._refill()  # type: ignore
+
+        assert token_bucket.current_capacity == pytest.approx(1.0, abs=0.05)  # type: ignore
+
+    @pytest.mark.asyncio
+    async def test_many_concurrent_tasks_succeed(self):
+        token_bucket = TokenBucket(curr_capacity=2.0)
+        await token_bucket.update_bucket(4.0)
+        completed_tasks: list[int] = []
+
+        async def worker(worker_id: int):
+            await token_bucket.acquire(0.1)
+            completed_tasks.append(worker_id)
+
+        try:
+            # At the fill rate of 4/second and acquire cost of 0.1, it should take
+            # around 2 seconds to process 100 tasks.
+            await asyncio.wait_for(
+                asyncio.gather(*[worker(i) for i in range(100)]), timeout=3
+            )
+        except TimeoutError:
+            pytest.fail("Deadlock detected: concurrent acquire operations timed out")
+
+        assert len(completed_tasks) == 100
+        assert len(set(completed_tasks)) == 100
+        assert token_bucket.current_capacity >= 0.0
