@@ -487,31 +487,32 @@ class StandardRetryStrategy(retries_interface.RetryStrategy):
 class TokenBucket:
     MIN_FILL_RATE = 0.5
     MIN_CAPACITY = 1.0
+    DEFAULT_TIMEOUT = 30.0
 
     def __init__(
         self,
         *,
-        curr_capacity: float | None = None,
-        max_capacity: float | None = None,
-        fill_rate: float | None = None,
+        curr_capacity: float = MIN_CAPACITY,
+        fill_rate: float = MIN_FILL_RATE,
+        default_timeout: float = DEFAULT_TIMEOUT,
     ):
-        self._curr_capacity: float = (
-            curr_capacity if curr_capacity is not None else self.MIN_CAPACITY
-        )
-        self._max_capacity: float = (
-            max_capacity
-            if max_capacity is not None
-            else max(self._curr_capacity, self.MIN_CAPACITY)
-        )
-        self._fill_rate: float = (
-            max(self.MIN_FILL_RATE, fill_rate)
-            if fill_rate is not None
-            else self.MIN_FILL_RATE
-        )
-        self._last_timestamp: float | None = None
+        self._curr_capacity: float = max(curr_capacity, self.MIN_CAPACITY)
+        self._max_capacity: float = self._curr_capacity
+        self._fill_rate: float = max(fill_rate, self.MIN_FILL_RATE)
+        self._default_timeout = default_timeout
+        self._last_timestamp: float = time.monotonic()
         self._lock = asyncio.Lock()
 
     async def acquire(self, amount: float) -> None:
+        """Acquire tokens from the bucket.
+
+        Args:
+            amount: Number of tokens to acquire
+
+        Raises:
+            TimeoutError: If acquisition takes longer than default_timeout
+        """
+        start_time = time.monotonic()
         while True:
             async with self._lock:
                 self._refill()
@@ -519,15 +520,16 @@ class TokenBucket:
                     self._curr_capacity -= amount
                     return
 
+                elapsed = time.monotonic() - start_time
+                if elapsed > self._default_timeout:
+                    raise TimeoutError(
+                        f"Failed to acquire {amount} tokens within {self._default_timeout}s"
+                    )
                 wait_time = (amount - self._curr_capacity) / self._fill_rate
             await asyncio.sleep(wait_time)
 
     def _refill(self) -> None:
         curr_time = time.monotonic()
-        if self._last_timestamp is None:
-            self._last_timestamp = curr_time
-            return
-
         elapsed = curr_time - self._last_timestamp
         refill_amount = elapsed * self._fill_rate
         self._curr_capacity = min(
