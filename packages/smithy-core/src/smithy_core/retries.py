@@ -485,6 +485,18 @@ class StandardRetryStrategy(retries_interface.RetryStrategy):
 
 
 class TokenBucket:
+    """
+    Implements the token bucket algorithm for rate limiting with configurable fill
+    rate and capacity. Tokens are added to the bucket at a fixed rate (fill_rate).
+    Requests must acquire tokens before proceeding, and will wait if insufficient
+    tokens are available.
+
+    Attributes:
+        MIN_FILL_RATE: Minimum allowed fill rate (0.5 tokens/second)
+        MIN_CAPACITY: Minimum allowed bucket capacity (1.0 tokens)
+        DEFAULT_TIMEOUT: Default timeout for token acquisition (30.0 seconds)
+    """
+
     MIN_FILL_RATE = 0.5
     MIN_CAPACITY = 1.0
     DEFAULT_TIMEOUT = 30.0
@@ -494,23 +506,35 @@ class TokenBucket:
         *,
         curr_capacity: float = MIN_CAPACITY,
         fill_rate: float = MIN_FILL_RATE,
-        default_timeout: float = DEFAULT_TIMEOUT,
+        timeout: float = DEFAULT_TIMEOUT,
     ):
+        """Initialize a new TokenBucket.
+
+        Args:
+            curr_capacity: Initial number of tokens in the bucket.
+            fill_rate: Rate at which tokens are added to the bucket (tokens/second).
+            timeout: Maximum time to wait for token acquisition before
+                raising TimeoutError.
+        """
         self._curr_capacity: float = max(curr_capacity, self.MIN_CAPACITY)
         self._max_capacity: float = self._curr_capacity
         self._fill_rate: float = max(fill_rate, self.MIN_FILL_RATE)
-        self._default_timeout = default_timeout
+        self._timeout = timeout
         self._last_timestamp: float = time.monotonic()
         self._lock = asyncio.Lock()
 
     async def acquire(self, amount: float) -> None:
         """Acquire tokens from the bucket.
 
+        If sufficient tokens are available, they are immediately consumed and the
+        method returns. If insufficient tokens are available, the method will wait
+        until enough tokens have been refilled or the timeout is reached.
+
         Args:
-            amount: Number of tokens to acquire
+            amount: Number of tokens to acquire.
 
         Raises:
-            TimeoutError: If acquisition takes longer than default_timeout
+            TimeoutError: If acquisition takes longer than the configured timeout.
         """
         start_time = time.monotonic()
         while True:
@@ -521,9 +545,9 @@ class TokenBucket:
                     return
 
                 elapsed = time.monotonic() - start_time
-                if elapsed > self._default_timeout:
+                if elapsed > self._timeout:
                     raise TimeoutError(
-                        f"Failed to acquire {amount} tokens within {self._default_timeout}s"
+                        f"Failed to acquire {amount} tokens within {self._timeout}s"
                     )
                 wait_time = (amount - self._curr_capacity) / self._fill_rate
             await asyncio.sleep(wait_time)
@@ -538,6 +562,13 @@ class TokenBucket:
         self._last_timestamp = curr_time
 
     async def update_bucket(self, rate: float) -> None:
+        """Update the bucket's fill rate, maximum capacity and current capacity (if its
+        greater than maximum capacity).
+
+        Args:
+            rate: New fill rate (tokens/second). It won't be less than MIN_FILL_RATE.
+                Current capacity will be reduced if it exceeds the new maximum capacity.
+        """
         async with self._lock:
             self._refill()
             self._fill_rate = max(rate, self.MIN_FILL_RATE)
@@ -546,12 +577,27 @@ class TokenBucket:
 
     @property
     def current_capacity(self) -> float:
+        """Get the current number of tokens in the bucket.
+
+        Returns:
+            The current token count as of the last refill operation.
+        """
         return self._curr_capacity
 
     @property
     def max_capacity(self) -> float:
+        """Get the maximum capacity of the bucket.
+
+        Returns:
+            The maximum number of tokens the bucket can hold.
+        """
         return self._max_capacity
 
     @property
     def fill_rate(self) -> float:
+        """Get the current fill rate of the bucket.
+
+        Returns:
+            The rate at which tokens are added to the bucket (tokens/second).
+        """
         return self._fill_rate

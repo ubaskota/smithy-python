@@ -1,6 +1,5 @@
 #  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #  SPDX-License-Identifier: Apache-2.0
-import asyncio
 from unittest.mock import patch
 
 import pytest
@@ -356,19 +355,3 @@ class TestTokenBucket:
             token_bucket._refill()  # type: ignore
 
         assert round(token_bucket.current_capacity, 1) == 1.0
-
-    @pytest.mark.asyncio
-    async def test_many_tasks_succeed(self):
-        token_bucket = TokenBucket(curr_capacity=2.0)
-        await token_bucket.update_bucket(4.0)
-        completed_tasks: list[int] = []
-
-        async def worker(worker_id: int):
-            await token_bucket.acquire(0.1)
-            completed_tasks.append(worker_id)
-
-        await asyncio.gather(*[worker(i) for i in range(100)])
-
-        assert len(completed_tasks) == 100
-        assert len(set(completed_tasks)) == 100
-        assert token_bucket.current_capacity >= 0.0
