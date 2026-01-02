@@ -310,30 +310,10 @@ class TestTokenBucket:
         assert token_bucket.current_capacity == 0.0
 
     @pytest.mark.asyncio
-    async def test_multiple_refills_over_time(self):
-        time_values = iter([0.0, 1.0, 1.0, 1.5, 1.5, 4.0, 4.0, 5.0])
-        with patch("time.monotonic", side_effect=lambda: next(time_values)):
-            token_bucket = TokenBucket(curr_capacity=0, fill_rate=2.0)
-            await token_bucket.acquire(1)
-            assert token_bucket.current_capacity == 0.0
-
-        with patch("time.monotonic", side_effect=lambda: next(time_values)):
-            await token_bucket.update_bucket(4)  # Update the rate of refill
-            assert token_bucket.current_capacity == 1.0
-
-        with patch("time.monotonic", side_effect=lambda: next(time_values)):
-            await token_bucket.acquire(1)
-            assert token_bucket.current_capacity == 3
-
-        with patch("time.monotonic", side_effect=lambda: next(time_values)):
-            await token_bucket.acquire(1)
-            assert token_bucket.current_capacity == 3
-
-    @pytest.mark.asyncio
-    async def test_update_bucket_updates_capacity(self):
+    async def test_update_bucket_updates_rate(self):
         token_bucket = TokenBucket()
 
-        await token_bucket.update_bucket(5.0)
+        await token_bucket.update_rate(5.0)
         assert token_bucket.fill_rate == 5.0
         assert token_bucket.max_capacity == 5.0
         assert token_bucket.current_capacity == 1.0
@@ -341,7 +321,7 @@ class TestTokenBucket:
     @pytest.mark.asyncio
     async def test_rate_can_never_be_zero(self):
         token_bucket = TokenBucket()
-        await token_bucket.update_bucket(0.0)
+        await token_bucket.update_rate(0.0)
 
         assert token_bucket.fill_rate != 0.0
 
@@ -349,9 +329,35 @@ class TestTokenBucket:
     async def test_refill_caps_at_max_capacity(self):
         token_bucket = TokenBucket()
         # Max and current capacity of the bucket is set to 1.0 initially
-        await token_bucket.update_bucket(10.0)
+        await token_bucket.update_rate(10.0)
 
         async with token_bucket._lock:  # type: ignore
             token_bucket._refill()  # type: ignore
 
         assert round(token_bucket.current_capacity, 1) == 1.0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "actions,expected_capacity",
+        [
+            ([("acquire", 1)], 0.0),
+            ([("acquire", 1), ("update", 4)], 1.0),
+            ([("acquire", 1), ("update", 4), ("acquire", 1)], 3.0),
+            ([("acquire", 1), ("update", 4), ("acquire", 1), ("acquire", 1)], 3.0),
+        ],
+    )
+    async def test_multiple_refills_over_time(
+        self, actions: list[tuple[str, int]], expected_capacity: float
+    ):
+        time_values = [0.0, 1.0, 1.0, 1.5, 1.5, 4.0, 4.0, 5.0]
+
+        with patch("time.monotonic", side_effect=time_values):
+            token_bucket = TokenBucket(curr_capacity=0, fill_rate=2.0)
+
+            for action, value in actions:
+                if action == "acquire":
+                    await token_bucket.acquire(value)
+                elif action == "update":
+                    await token_bucket.update_rate(value)
+
+            assert token_bucket.current_capacity == expected_capacity
