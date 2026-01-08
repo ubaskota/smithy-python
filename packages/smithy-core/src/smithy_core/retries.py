@@ -485,7 +485,8 @@ class StandardRetryStrategy(retries_interface.RetryStrategy):
 
 
 class TokenBucket:
-    """
+    """Token bucket for rate limiting with configurable fill rate.
+
     TokenBucket provides a collection of arbitrary tokens while managing issuance
     and refilling over time. This is controlled by a fill rate that can be variably
     adjusted. When tokens aren't available, the bucket will enforce a delay before
