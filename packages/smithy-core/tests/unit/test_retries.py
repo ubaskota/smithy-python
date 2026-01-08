@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import pytest
 from smithy_core.exceptions import CallError, RetryError
+from smithy_core.retries import ExponentialBackoffJitterType as EBJT
 from smithy_core.retries import (
     ClientRateLimiter,
     CubicCalculator,
@@ -16,7 +17,6 @@ from smithy_core.retries import (
     StandardRetryStrategy,
     TokenBucket,
 )
-from smithy_core.retries import ExponentialBackoffJitterType as EBJT
 
 
 @pytest.mark.parametrize(
