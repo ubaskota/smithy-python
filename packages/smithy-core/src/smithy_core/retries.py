@@ -597,6 +597,7 @@ class TokenBucket:
 
 class CubicCalculator:
     """CubicCalculator calculates a new rate using CUBIC algorithm.
+
     CubicCalculator implements the CUBIC congestion control algorithm for
     adaptive rate limiting. It dynamically adjusts request rates based on
     throttling responses, reducing rates by 70% when throttled and
@@ -615,6 +616,7 @@ class CubicCalculator:
         beta: float = _BETA,
     ):
         """Initialize a new CubicCalculator.
+
         :param starting_max_rate: Initial maximum rate of the CubicCalculator.
         :param start_time: Initial time of the CubicCalculator.
         :param scale_constant: Scale constant used to scale up requests.
@@ -628,6 +630,7 @@ class CubicCalculator:
 
     def calculate_and_update_inflection_point(self) -> float:
         """Calculate and update the CUBIC inflection point for rate recovery.
+
         After throttling, the CUBIC curve returns to the previous maximum rate
         after exactly `_inflection_point_time` seconds. Before this point, the
         rate grows slowly. After this point, it grows rapidly.
@@ -640,6 +643,7 @@ class CubicCalculator:
 
     def scale_request(self, timestamp: float) -> float:
         """Scale up the request rate after a successful response.
+
         :param timestamp: Timestamp of the response.
         :return: New calculated request rate based on CUBIC scaling.
         """
@@ -651,6 +655,7 @@ class CubicCalculator:
 
     def throttle_request(self, rate_to_use: float, timestamp: float) -> float:
         """Throttle the request rate after a throttled response is received.
+
         :param rate_to_use: Current request rate in use.
         :param timestamp: Timestamp of the response.
         :return: New calculated request rate based on CUBIC throttling.
@@ -671,6 +676,7 @@ class CubicCalculator:
 
 class RequestRateTracker:
     """RequestRateTracker tracks the client's request sending rate.
+
     RequestRateTracker measures the actual client request sending rate using
     time-bucketed sampling with exponential smoothing. It tracks requests in
     half-second intervals by default and calculates a smoothed average rate
@@ -686,6 +692,7 @@ class RequestRateTracker:
         time_bucket_range: float = _TIME_BUCKET_RANGE,
     ):
         """Initialize a new RequestRateTracker.
+
         :param smoothing: Exponential smoothing factor. This constant
         represents how much weight is given to recent measurements.
         Higher values place more emphasis on the most recent observations.
@@ -700,6 +707,7 @@ class RequestRateTracker:
 
     def measure_rate(self) -> float:
         """Measure and return the current request rate.
+
         Increments the request count and calculates a new smoothed rate when
         transitioning to a new time bucket. Returns the current measured rate
         without recalculation if still within the same time bucket.
@@ -732,6 +740,7 @@ class RequestRateTracker:
 
 class ClientRateLimiter:
     """ClientRateLimiter limits the rate of requests.
+
     ClientRateLimiter implements adaptive rate limiting using token bucket and CUBIC
     algorithm. It controls request sending rates by acquiring tokens before requests
     and dynamically adjusting rates based on service responses - reducing rates when
@@ -749,6 +758,7 @@ class ClientRateLimiter:
         rate_limiter_enabled: bool,
     ):
         """Initialize a new ClientRateLimiter.
+
         :param token_bucket: Token bucket for controlling request sending rates.
         :param cubic_calculator: CUBIC algorithm calculator for rate adjustments.
         :param rate_tracker: Tracker for measuring actual client request rates.
@@ -767,6 +777,7 @@ class ClientRateLimiter:
 
     async def after_receiving_response(self, throttling_error: bool) -> None:
         """Update the request rate based on the response using CUBIC algorithm.
+
         Reduces the rate by 70% when throttled, or increases the rate using
         CUBIC scaling for successful responses. Updates the token bucket with
         the new calculated rate, capped at 2x the measured client rate.
