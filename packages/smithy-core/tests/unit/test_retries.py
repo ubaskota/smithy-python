@@ -465,7 +465,9 @@ class TestRateLimiter:
 
             with (
                 patch.object(tracker, "measure_rate", return_value=5.0),
-                patch.object(calculator, "scale_request", return_value=20.0),
+                patch.object(
+                    calculator, "calculate_scaled_request_rate", return_value=20.0
+                ),
                 patch.object(token_bucket, "update_rate") as mock_update,
             ):
                 await limiter.after_receiving_response(throttling_error=False)
@@ -572,7 +574,9 @@ class TestCubicCalculator:
 
     def test_throttle_request(self):
         calculator = CubicCalculator(starting_max_rate=10.0, start_time=5.0)
-        result = calculator.throttle_request(rate_to_use=8.0, timestamp=10.0)
+        result = calculator.calculate_throttled_request_rate(
+            rate_to_use=8.0, timestamp=10.0
+        )
 
         assert result == 8.0 * 0.7
         assert calculator.last_max_rate == 8.0
@@ -582,8 +586,8 @@ class TestCubicCalculator:
         calculator = CubicCalculator(starting_max_rate=10.0, start_time=5.0)
         calculator.calculate_and_update_inflection_point()
 
-        request_rate_prev = calculator.scale_request(timestamp=6.0)
-        request_rate_curr = calculator.scale_request(timestamp=8.0)
+        request_rate_prev = calculator.calculate_scaled_request_rate(timestamp=6.0)
+        request_rate_curr = calculator.calculate_scaled_request_rate(timestamp=8.0)
 
         assert request_rate_prev < request_rate_curr  # Rate should increase over time
 
@@ -597,26 +601,26 @@ class TestCubicCalculator:
 
 
 class TestRequestRateTracker:
-    def test_measure_rate_same_bucket(self):
+    async def test_measure_rate_same_bucket(self):
         with patch("time.monotonic") as mock_time:
             # Multiple calls in same time bucket should just increment count
             mock_time.side_effect = [0.0, 0.3, 0.4]
             tracker = RequestRateTracker()
-            rate1 = tracker.measure_rate()
-            rate2 = tracker.measure_rate()
+            rate1 = await tracker.measure_rate()
+            rate2 = await tracker.measure_rate()
 
         assert rate1 == 0
         assert rate2 == 0
         assert tracker.request_count == 2
 
-    def test_measure_rate_new_bucket(self):
+    async def test_measure_rate_new_bucket(self):
         with patch("time.monotonic") as mock_time:
             # Multiple calls in different time buckets should increment rate and reset count
             mock_time.side_effect = [0.0, 0.1, 0.7]
             tracker = RequestRateTracker()
 
-            tracker.measure_rate()
-            rate = tracker.measure_rate()
+            await tracker.measure_rate()
+            rate = await tracker.measure_rate()
 
             assert rate > 0
             assert tracker.request_count == 0

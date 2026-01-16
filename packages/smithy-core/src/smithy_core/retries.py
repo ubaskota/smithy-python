@@ -596,36 +596,39 @@ class TokenBucket:
 
 
 class CubicCalculator:
-    """CubicCalculator calculates a new rate using CUBIC algorithm.
+    """CubicCalculator calculates a new rate using a modified CUBIC algorithm.
 
     CubicCalculator implements the CUBIC congestion control algorithm for
     adaptive rate limiting. It dynamically adjusts request rates based on
-    throttling responses, reducing rates by 70% when throttled and
+    throttling responses, reducing rates by 30% when throttled and
     gradually increasing rates using a scale function when the request
     is successful.
     """
 
+    # Scale constant used to scale up requests
     _SCALE_CONSTANT = 0.4
+    # Beta constant used to slow down requests
     _BETA = 0.7
 
     def __init__(
         self,
-        starting_max_rate: float,
-        start_time: float,
-        scale_constant: float = _SCALE_CONSTANT,
-        beta: float = _BETA,
+        starting_max_rate: float = 0.5,
+        start_time: float | None = None,
     ):
         """Initialize a new CubicCalculator.
 
-        :param starting_max_rate: Initial maximum rate of the CubicCalculator.
+        :param starting_max_rate: Initial maximum request per second.
         :param start_time: Initial time of the CubicCalculator.
-        :param scale_constant: Scale constant used to scale up requests.
-        :param beta: Beta constant used to slow down requests.
         """
+        if starting_max_rate <= 0:
+            raise ValueError(
+                f"starting_max_rate must be positive, got {starting_max_rate}"
+            )
+        if start_time is None:
+            start_time = time.monotonic()
+
         self._last_max_rate = starting_max_rate
         self._last_throttle_time = start_time
-        self._scale_constant = scale_constant
-        self._beta = beta
         self._inflection_point_time = self.calculate_and_update_inflection_point()
 
     def calculate_and_update_inflection_point(self) -> float:
@@ -637,11 +640,11 @@ class CubicCalculator:
         :return: Inflection point time in seconds for the CUBIC algorithm.
         """
         self._inflection_point_time = (
-            (self._last_max_rate * (1 - self._beta)) / self._scale_constant
+            (self._last_max_rate * (1 - self._BETA)) / self._SCALE_CONSTANT
         ) ** (1 / 3.0)
         return self._inflection_point_time
 
-    def scale_request(self, timestamp: float) -> float:
+    def calculate_scaled_request_rate(self, timestamp: float) -> float:
         """Scale up the request rate after a successful response.
 
         :param timestamp: Timestamp of the response.
@@ -649,18 +652,20 @@ class CubicCalculator:
         """
         dt = timestamp - self._last_throttle_time
         calculated_rate = (
-            self._scale_constant * ((dt - self._inflection_point_time) ** 3)
+            self._SCALE_CONSTANT * ((dt - self._inflection_point_time) ** 3)
         ) + self._last_max_rate
         return calculated_rate
 
-    def throttle_request(self, rate_to_use: float, timestamp: float) -> float:
+    def calculate_throttled_request_rate(
+        self, rate_to_use: float, timestamp: float
+    ) -> float:
         """Throttle the request rate after a throttled response is received.
 
         :param rate_to_use: Current request rate in use.
         :param timestamp: Timestamp of the response.
         :return: New calculated request rate based on CUBIC throttling.
         """
-        calculated_rate = rate_to_use * self._beta
+        calculated_rate = rate_to_use * self._BETA
         self._last_max_rate = rate_to_use
         self._last_throttle_time = timestamp
         return calculated_rate
@@ -704,8 +709,9 @@ class RequestRateTracker:
         self._request_count = 0
         self._last_calculated_time_bucket = math.floor(time.monotonic())
         self._measured_rate = 0
+        self._lock = asyncio.Lock()
 
-    def measure_rate(self) -> float:
+    async def measure_rate(self) -> float:
         """Measure and return the current request rate.
 
         Increments the request count and calculates a new smoothed rate when
@@ -713,28 +719,32 @@ class RequestRateTracker:
         without recalculation if still within the same time bucket.
         :return: Current smoothed request rate in requests per second.
         """
-        curr_time = time.monotonic()
-        current_time_bucket = (
-            math.floor(curr_time * self._time_bucket_scale) / self._time_bucket_scale
-        )
-        self._request_count += 1
-        if current_time_bucket > self._last_calculated_time_bucket:
-            current_rate = self._request_count / (
-                current_time_bucket - self._last_calculated_time_bucket
+        async with self._lock:
+            curr_time = time.monotonic()
+            current_time_bucket = (
+                math.floor(curr_time * self._time_bucket_scale)
+                / self._time_bucket_scale
             )
-            self._measured_rate = (current_rate * self._smoothing) + (
-                self._measured_rate * (1 - self._smoothing)
-            )
-            self._request_count = 0
-            self._last_calculated_time_bucket = current_time_bucket
-        return self._measured_rate
+            self._request_count += 1
+            if current_time_bucket > self._last_calculated_time_bucket:
+                current_rate = self._request_count / (
+                    current_time_bucket - self._last_calculated_time_bucket
+                )
+                self._measured_rate = (current_rate * self._smoothing) + (
+                    self._measured_rate * (1 - self._smoothing)
+                )
+                self._request_count = 0
+                self._last_calculated_time_bucket = current_time_bucket
+            return self._measured_rate
 
     @property
     def request_count(self) -> int:
+        """Get current request count. For testing only."""
         return self._request_count
 
     @property
     def measured_client_rate(self) -> float:
+        """Get the client's sending rate. For testing only."""
         return self._measured_rate
 
 
@@ -778,12 +788,12 @@ class ClientRateLimiter:
     async def after_receiving_response(self, throttling_error: bool) -> None:
         """Update the request rate based on the response using CUBIC algorithm.
 
-        Reduces the rate by 70% when throttled, or increases the rate using
+        Reduces the rate by 30% when throttled, or increases the rate using
         CUBIC scaling for successful responses. Updates the token bucket with
         the new calculated rate, capped at 2x the measured client rate.
         :param throttling_error: True if the response was a throttling error.
         """
-        measured_rate = self._rate_tracker.measure_rate()
+        measured_rate = await self._rate_tracker.measure_rate()
         timestamp = time.monotonic()
         if throttling_error:
             if not self._rate_limiter_enabled:
@@ -793,12 +803,16 @@ class ClientRateLimiter:
                 rate_to_use = min(measured_rate, fill_rate)
 
             self._cubic_calculator.calculate_and_update_inflection_point()
-            cubic_calculated_rate = self._cubic_calculator.throttle_request(
-                rate_to_use, timestamp
+            cubic_calculated_rate = (
+                self._cubic_calculator.calculate_throttled_request_rate(
+                    rate_to_use, timestamp
+                )
             )
             self._rate_limiter_enabled = True
         else:
-            cubic_calculated_rate = self._cubic_calculator.scale_request(timestamp)
+            cubic_calculated_rate = (
+                self._cubic_calculator.calculate_scaled_request_rate(timestamp)
+            )
 
         new_rate = min(cubic_calculated_rate, 2 * measured_rate)
         await self._token_bucket.update_rate(new_rate)
